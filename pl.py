@@ -46,6 +46,27 @@ def load_face_dataset(root_dir, img_size=64):
 
     return X, y, class_names
 
+def conv2d_single_filter(image, filt):
+    """
+    image: 2D array, shape (H, W)
+    filt: 2D array, shape (F, F), -- a single filter
+    returns: a 2D feature map
+    """
+    H, W, = image.shape
+    F, _ = filt.shape
+
+    out_h = H - F + 1 #how many valid positions the filter can slide to vertically
+    out_w = W - F + 1 #and horizontally
+
+    output = np.zeros((out_h, out_w))
+
+    for i in range(out_h):
+        for j in range(out_w):
+            patch = image[i: i+F, j: j+F] # the little window under the filter right now
+            output[i, j] = np.sum(patch * filt) #multiply element wise, then sum
+
+    return output
+
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons):
         self.weights = 0.1*np.random.randn(n_inputs, n_neurons)
