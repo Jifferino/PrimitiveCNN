@@ -46,26 +46,76 @@ def load_face_dataset(root_dir, img_size=64):
 
     return X, y, class_names
 
-def conv2d_single_filter(image, filt):
-    """
-    image: 2D array, shape (H, W)
-    filt: 2D array, shape (F, F), -- a single filter
-    returns: a 2D feature map
-    """
-    H, W, = image.shape
-    F, _ = filt.shape
+def get_im2col_indices(x_shape, field_height, field_width, padding, stride):
+    N, C, H, W = x_shape
+    out_height = (H + 2 * padding - field_height) // stride + 1
+    out_width = (W + 2 * padding - field_width) // stride + 1
 
-    out_h = H - F + 1 #how many valid positions the filter can slide to vertically
-    out_w = W - F + 1 #and horizontally
+    i0 = np.repeat(np.arange(field_height), field_width)
+    i0 = np.tile(i0, C)
+    i1 = stride * np.repeat(np.arange(out_height), out_width)
+    j0 = np.tile(np.arange(field_width), field_height * C)
+    j1 = stride * np.tile(np.arange(out_width), out_height)
+    i = i0.reshape(-1, 1) + i1.reshape(1, -1)
+    j = j0.reshape(-1, 1) + j1.reshape(1, -1)
+    k = np.repeat(np.arange(C), field_height * field_width).reshape(-1, 1)
+    return k, i, j
 
-    output = np.zeros((out_h, out_w))
+def im2col(x, field_height, field_width, padding=0, stride=1):
+    x_padded = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)), mode='constant')
+    k, i, j = get_im2col_indices(x.shape, field_height, field_width, padding, stride)
+    cols = x_padded[:, k, i, j]
+    C = x.shape[1]
+    cols = cols.transpose(1, 2, 0).reshape(field_height * field_width * C, -1)
+    return cols
 
-    for i in range(out_h):
-        for j in range(out_w):
-            patch = image[i: i+F, j: j+F] # the little window under the filter right now
-            output[i, j] = np.sum(patch * filt) #multiply element wise, then sum
+class Layer_Conv2D:
+    def __init__(self, n_filters, input_channels, filter_size, stride=1, padding=0):
+        self.stride = stride
+        self.padding = padding
+        self.filter_size = filter_size
+        # one small filter per output channel, same "small random start" idea as Layer_Dense
+        self.weights = 0.1 * np.random.rand(n_filters, input_channels, filter_size, filter_size)
+        self.biases = np.zers((n_filters, 1))
 
-    return output
+    def forward(self, inputs):
+        self.inputs = inputs
+        N, C, H, W = inputs.shape
+        F = self.filter_size
+        n_filters = self.weights.shape[0]
+
+        out_h = (H + 2 * self.padding - F) // self.stride + 1
+        out_w = (W + 2 * self.padding - F) // self.stride + 1
+
+        self.x_cols = im2col(inputs, F, F, self.padding, self.stride) # all patches, flattened
+        w_col = self.weights.reshape(n_filters, -1) # all filters, flattened
+
+        out = w_col @ self.x_cols + self.biases #big matrix multiplication instead of loop
+        self.output = out.reshape(n_filters, out_h, out_w, N).transpose(3, 0, 1, 2)
+
+class Layer_MaxPool2D:
+    def __init__(self, pool_size=2, stride=2):
+        self.pool_size = pool_size
+        self.stride = stride
+
+    def forward(self, inputs):
+        self.inputs = inputs
+        N, C, H, W = inputs.shape
+        F, S = self.pool_size, self.stride
+        out_h = (H - F) // S + 1
+        out_w = (W - F) // S + 1
+
+        # Treat each channel as if it were its own separate 1-channel image
+        # so we can reuse im2col exactly as is
+        x_reshaped = inputs.reshape(N*C, 1, H, W)
+        cols = im2col(x_reshaped, F, F, padding=0, stride=S) #shape: (F*F, out_h*out_w*N*C)
+
+        self.cols = cols
+        self.argmax = np.argmax(cols, axis=0) # which row (which pixel) was biggest, per column
+        out = cols[self.argmax, np.arange(cols.shape[1])] # pull out that max value for every column
+
+        self.output = out.reshape(out_h, out_w, N, C).transpose(2, 3, 0, 1)
+
 
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons):
