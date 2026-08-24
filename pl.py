@@ -43,7 +43,6 @@ def load_face_dataset(root_dir, img_size=64):
     X = np.array(X, dtype=np.float32) / 255.0 # normalize to 0-1
     X = X.reshape(-1, 1, img_size, img_size) # add the channel dimension: (N, 1, H, W)
     y = np.array(y, dtype=np.uint8)
-
     return X, y, class_names
 
 def get_im2col_indices(x_shape, field_height, field_width, padding, stride):
@@ -69,6 +68,18 @@ def im2col(x, field_height, field_width, padding=0, stride=1):
     cols = cols.transpose(1, 2, 0).reshape(field_height * field_width * C, -1)
     return cols
 
+def col2im(cols, x_shape, field_height, field_width, padding=0, stride=1):
+    N, C, H, W = x_shape
+    H_padded, W_padded = H + 2 * padding, W + 2 * padding
+    x_padded = np.zeros((N, C, H_padded, W_padded), dtype=cols.dtype)
+    k, i, j = get_im2col_indices(x_shape, field_height, field_width, padding, stride)
+    cols_reshaped = cols.reshape(C * field_height * field_width, -1, N)
+    cols_reshaped = cols_reshaped.transpose(2, 0, 1)
+    np.add.at(x_padded, (slice(None), k, i, j), cols_reshaped)
+    if padding == 0:
+        return x_padded
+    return x_padded[:, :, padding:-padding, padding:-padding]
+
 class Layer_Conv2D:
     def __init__(self, n_filters, input_channels, filter_size, stride=1, padding=0):
         self.stride = stride
@@ -93,6 +104,17 @@ class Layer_Conv2D:
         out = w_col @ self.x_cols + self.biases #big matrix multiplication instead of loop
         self.output = out.reshape(n_filters, out_h, out_w, N).transpose(3, 0, 1, 2)
 
+    def backward(self, dvalues):
+        n_filters, _, F, _ = self.weights.shape
+        dvalues_reshaped = dvalues.transpose(1, 2, 3, 0).reshape(n_filters, -1)
+
+        self.dbiases = np.sum(dvalues_reshaped, axis=1, keepdims=True)
+        self.dweights = (dvalues_reshaped @ self.x_cols.T).reshape(self.weights.shape)
+
+        w_col = self.weights.reshape(n_filters, -1)
+        dx_cols = w_col.T @ dvalues_reshaped
+        self.dinputs = col2im(dx_cols, self.inputs.shape, F, F, self.padding, self.stride)
+
 class Layer_MaxPool2D:
     def __init__(self, pool_size=2, stride=2):
         self.pool_size = pool_size
@@ -105,6 +127,8 @@ class Layer_MaxPool2D:
         out_h = (H - F) // S + 1
         out_w = (W - F) // S + 1
 
+        self.out_shape = (out_h, out_w)
+
         # Treat each channel as if it were its own separate 1-channel image
         # so we can reuse im2col exactly as is
         x_reshaped = inputs.reshape(N*C, 1, H, W)
@@ -116,6 +140,25 @@ class Layer_MaxPool2D:
 
         self.output = out.reshape(out_h, out_w, N, C).transpose(2, 3, 0, 1)
 
+    def backward(self, dvalues):
+        N, C, H, W = self.inputs.shape
+        F, S = self.pool_size, self.stride
+        out_h, out_w = self.out_shape
+
+        dcols = np.zeros_like(self.cols)
+        dvalues_flat = dvalues.transpose(2, 3, 0, 1).reshape(-1)
+        dcols[self.argmax, np.arange(dcols.shape[1])] = dvalues_flat
+
+        dx_reshaped = col2im(dcols, (N * C, 1, H, W), F, F, padding=0, stride=S)
+        self.dinputs = dx_reshaped.reshape(N, C, H, W)
+
+class Layer_Flatten:
+    def forward(self, inputs):
+        self.input_shape = inputs.shape
+        self.output = input.reshape(inputs.shape[0], -1)
+
+    def backward(self, dvalues):
+        self.dinputs = dvalues.reshape(self.input_shape)
 
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons):
