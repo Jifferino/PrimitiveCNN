@@ -87,7 +87,7 @@ class Layer_Conv2D:
         self.filter_size = filter_size
         # one small filter per output channel, same "small random start" idea as Layer_Dense
         self.weights = 0.1 * np.random.rand(n_filters, input_channels, filter_size, filter_size)
-        self.biases = np.zers((n_filters, 1))
+        self.biases = np.zeros((n_filters, 1))
 
     def forward(self, inputs):
         self.inputs = inputs
@@ -155,7 +155,7 @@ class Layer_MaxPool2D:
 class Layer_Flatten:
     def forward(self, inputs):
         self.input_shape = inputs.shape
-        self.output = input.reshape(inputs.shape[0], -1)
+        self.output = inputs.reshape(inputs.shape[0], -1)
 
     def backward(self, dvalues):
         self.dinputs = dvalues.reshape(self.input_shape)
@@ -164,6 +164,7 @@ class Layer_Dense:
     def __init__(self, n_inputs, n_neurons):
         self.weights = 0.1*np.random.randn(n_inputs, n_neurons)
         self.biases = np.zeros((1, n_neurons))
+
     def forward(self, inputs):
         self.output = np.dot(inputs, self.weights) + self.biases
     
@@ -196,7 +197,7 @@ class Loss:
         sample_losses = self.forward(output, y)
         data_loss = np.mean(sample_losses)
         return data_loss
-    
+
 class Loss_CategoricalCrossEntropy(Loss):
     def forward(self, y_pred, y_true):
         samples = len(y_pred)
@@ -223,7 +224,7 @@ class Activation_Softmax_Loss_CategoricalCrossentropy:
     def backward(self, dvalues, y_true):
         samples = len(dvalues)
         #convert on hot to sparse labels if needed
-        if len(y_true.shape == 2):
+        if len(y_true.shape) == 2:
             y_true = np.argmax(y_true, axis=1)
 
         self.dinputs = dvalues.copy()
@@ -238,40 +239,98 @@ class Optimizer_SGD:
         layer.weights += -self.learning_rate * layer.dweights
         layer.biases += -self.learning_rate * layer.dbiases
 
-X,y = create_data(points=100, classes=3)
+def train_test_split(X, y, test_fraction=0.2, seed=0):
+    rng = np.random.default_rng(seed)
+    idx = rng.permutation(len(x))
+    split = int(len(X) * (1 - test_fraction))
+    train_idx, test_idx = idx[:split], idx[split:]
+    return X[train_idx], y[train_idx], X[test_idx], y[test_idx]
 
-dense1 = Layer_Dense(2,64) #hidden layer
-activation1 = Activation_ReLU()
+def build_model(n_classes, img_size=64):
+    layers = {
+        'conv1': Layer_Conv2D(n_filters=8, input_channels=1, filter_size=3, stride=1, padding=1),
+        'relu1': Activation_ReLU(),
+        'pool1': Layer_MaxPool2D(pool_size=2, stride=2),
 
-dense2 = Layer_Dense(64, 3) #output layer
-loss_activation = Activation_Softmax_Loss_CategoricalCrossentropy()
+        'conv2': Layer_Conv2D(n_filters=16, input_channels=8, filter_size=3, stride=1, padding=1),
+        'relu2': Activation_ReLU(),
+        'pool2': Layer_MaxPool2D(pool_size=2, stride=2),
 
-optimizer = Optimizer_SGD(learning_rate=1.0)
+        'flatten': Layer_Flatten(),
+    }
+    flattened_size = 16 * (img_size // 4) * (img_size // 4) #pool_size and stride both halve the size of the image so the new image is 1/4 the size
+    layers['dense1'] = Layer_Dense(flattened_size, 128)
+    layers['relu3'] = Activation_ReLU()
+    layers['dense2'] = Layer_Dense(128, n_classes)
+    layers['loss_activation'] = Activation_Softmax_Loss_CategoricalCrossentropy()
+    return layers
 
-for epoch in range(10001):
-    #forward pass
-    dense1.forward(X)
-    activation1.forward(dense1.output)
-    dense2.forward(activation1.output)
-    loss = loss_activation.forward(dense2.output, y)
+def forward_pass(layers, X_batch, y_batch):
+    layers['conv1'].forward(X_batch)
+    layers['relu1'].forward(layers['conv1'].output)
+    layers['pool1'].forward(layers['relu1'].output)
 
-    #accuracy - for monitoring
-    predictions = np.argmax(loss_activation.output, axis=1)
-    if len(y.shape) == 2:
-        y_compare = np.argmax(y, axis=1)
-    else:
-        y_compare = y
-    accuracy = np.mean(predictions == y_compare)
+    layers['conv2'].forward(layers['pool1'].output)
+    layers['relu2'].forward(layers['conv2'].output)
+    layers['pool2'].forward(layers['relu2'].output)
 
-    if epoch % 1000 == 0:
-        print(f'epoch: {epoch}, loss: {loss:.3f}, accuracy: {accuracy:.3f}')
+    layers['flatten'].forward(layers['pool2'].output)
 
-    #backward pass
-    loss_activation.backward(loss_activation.output, y)
-    dense2.backward(loss_activation.dinputs)
-    activation1.backward(dense2.dinputs)
-    dense1.backward(activation1.dinputs)
+    layers['dense1'].forward(layers['flatten'].output)
+    layers['relu3'].forward(layers['dense1'].output)
+    layers['dense2'].forward(layers['relu3'].output)
 
-    #update weights and biases
-    optimizer.update_params(dense1)
-    optimizer.update_params(dense2)
+    loss = layers['loss_activation'].forward(layers['dense2'].output, y_batch)
+    return loss
+
+
+def backward_pass(layers, y_batch):
+    layers['loss_activation'].backward(layers['loss_activation'].output, y_batch)
+    layers['dense2'].backward(layers['loss_activation'].dinputs)
+    layers['relu3'].backward(layers['dense2'].dinputs)
+    layers['dense1'].backward(layers['relu3'].dinputs)
+
+    layers['flatten'].backward(layers['dense1'].dinputs)
+
+    layers['pool2'].backward(layers['flatten'].dinputs)
+    layers['relu2'].backward(layers['pool2'].dinputs)
+    layers['conv2'].backward(layers['relu2'].dinputs)
+
+    layers['pool1'].backward(layers['conv2'].dinputs)
+    layers['relu1'].backward(layers['pool1'].dinputs)
+    layers['conv1'].backward(layers['relu1'].dinputs)
+
+def train(root_dir, img_size=64, epochs=30, batch_size=16, learning_rate=1.0):
+    X, y, class_names = load_face_dataset(root_dir, img_size=img_size)
+    X_train, y_train, X_test, y_test = train_test_split(X, y, test_fraction=0.2)
+
+    layers = build_model(n_classes=len(class_names), img_size=img_size)
+    optimizer = Optimizer_SGD(learning_rate=learning_rate)
+
+    n_samples = len(X_train)
+
+    for epoch in range(epochs):
+        perm = np.random.permutation(n_samples)     # reshuffle order every epoch
+        X_train, y_train = X_train[perm], y_train[perm]
+
+        epoch_losses = []
+        for start in range(0, n_samples, batch_size):
+            X_batch = X_train[start:start + batch_size]
+            y_batch = y_train[start:start + batch_size]
+
+            loss = forward_pass(layers, X_batch, y_batch)
+            epoch_losses.append(loss)
+
+            backward_pass(layers, y_batch)
+
+            for name in ('conv1', 'conv2', 'dense1', 'dense2'):
+                optimizer.update_params(layers[name])
+
+        test_loss = forward_pass(layers, X_test, y_test)
+        preds = np.argmax(layers['loss_activation'].output, axis=1)
+        test_acc = np.mean(preds == y_test)
+
+        print(f"epoch {epoch+1:3d} | train loss {np.mean(epoch_losses):.3f} "
+              f"| test loss {test_loss:.3f} | test acc {test_acc:.3f}")
+
+    return layers, class_names
