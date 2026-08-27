@@ -92,8 +92,8 @@ class Layer_Conv2D:
         self.filter_size = filter_size
         fan_in = input_channels * filter_size * filter_size
         # one small filter per output channel, same "small random start" idea as Layer_Dense
-        self.weights = np.random.rand(n_filters, input_channels, filter_size, filter_size) * np.sqrt(2.0 / fan_in)
-        self.biases = np.zeros((n_filters, 1))
+        self.weights = np.random.randn(n_filters, input_channels, filter_size, filter_size) * np.sqrt(2.0 / fan_in)
+        self.biases = np.full((n_filters, 1), 0.01)
 
     def forward(self, inputs):
         self.inputs = inputs
@@ -168,8 +168,8 @@ class Layer_Flatten:
 
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons):
-        self.weights = np.random.randn(n_inputs, n_neurons) / np.sqrt(2.0 / n_inputs)
-        self.biases = np.zeros((1, n_neurons))
+        self.weights = np.random.randn(n_inputs, n_neurons) * np.sqrt(2.0 / n_inputs)
+        self.biases = np.full((1, n_neurons), 0.01)
 
     def forward(self, inputs):
         self.inputs = inputs
@@ -288,19 +288,18 @@ def forward_pass(layers, X_batch, y_batch):
     layers['conv1'].forward(X_batch)
     layers['relu1'].forward(layers['conv1'].output)
     layers['pool1'].forward(layers['relu1'].output)
-    print("fraction dead:", np.mean(layers['relu1'].output == 0))
 
     layers['conv2'].forward(layers['pool1'].output)
     layers['relu2'].forward(layers['conv2'].output)
     layers['pool2'].forward(layers['relu2'].output)
-    print("fraction dead:", np.mean(layers['relu2'].output == 0))
+    #print("fraction dead:", np.mean(layers['relu2'].output == 0))
 
     layers['flatten'].forward(layers['pool2'].output)
 
     layers['dense1'].forward(layers['flatten'].output)
     layers['relu3'].forward(layers['dense1'].output)
     layers['dense2'].forward(layers['relu3'].output)
-    print("fraction dead:", np.mean(layers['relu3'].output == 0))
+    #print("fraction dead:", np.mean(layers['relu3'].output == 0))
 
     loss = layers['loss_activation'].forward(layers['dense2'].output, y_batch)
     return loss
