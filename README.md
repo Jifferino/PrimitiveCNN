@@ -1,8 +1,8 @@
 # PrimitiveCNN
 
-A convolutional neural network built entirely from scratch with NumPy — no PyTorch, TensorFlow, or Keras. It performs face *recognition* (identifying **who** is in an image, not just detecting that a face is present), with the end goal of running on a Raspberry Pi as the vision system for a robot.
+A convolutional neural network built entirely from scratch with NumPy- no PyTorch, TensorFlow, or Keras. It performs face *recognition* (identifying **who** is in an image, not just detecting that a face is present), with the end goal of running on a Raspberry Pi as the vision system for a robot.
 
-OpenCV is used only as a tool to locate and crop faces (via a pre-trained Haar cascade); every layer of the actual network — convolution, pooling, dense layers, activations, loss, backprop, and the optimizer — is hand-implemented.
+OpenCV is used only as a tool to locate and crop faces (via a pre-trained Haar cascade); every layer of the actual network- convolution, pooling, dense layers, activations, loss, backprop, and the optimizer is hand-implemented.
 
 ## Why "primitive"
 
