@@ -23,7 +23,7 @@ def extract_face(gray_image, img_size=64):
 
     return cv2.resize(crop, (img_size, img_size))
 
-def load_face_dataset(root_dir, img_size=64):
+def load_face_dataset(root_dir, img_size=64, augment=True):
     X = [] # will hold every processed face image
     y = [] # will hold the matching label (integer) for each image
     class_names = sorted(os.listdir(root_dir)) # e.g. ['luca', 'lexi', etc]
@@ -39,6 +39,11 @@ def load_face_dataset(root_dir, img_size=64):
             face = extract_face(img, img_size)
             X.append(face)
             y.append(label)
+
+            if augment:
+                flipped = cv2.flip(face, 1)
+                X.append(flipped)
+                y.append(label)
 
     X = np.array(X, dtype=np.float32) / 255.0 # normalize to 0-1
     X = X.reshape(-1, 1, img_size, img_size) # add the channel dimension: (N, 1, H, W)
@@ -85,8 +90,9 @@ class Layer_Conv2D:
         self.stride = stride
         self.padding = padding
         self.filter_size = filter_size
+        fan_in = input_channels * filter_size * filter_size
         # one small filter per output channel, same "small random start" idea as Layer_Dense
-        self.weights = 0.1 * np.random.rand(n_filters, input_channels, filter_size, filter_size)
+        self.weights = np.random.rand(n_filters, input_channels, filter_size, filter_size) * np.sqrt(2.0 / fan_in)
         self.biases = np.zeros((n_filters, 1))
 
     def forward(self, inputs):
@@ -162,10 +168,11 @@ class Layer_Flatten:
 
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons):
-        self.weights = 0.1*np.random.randn(n_inputs, n_neurons)
+        self.weights = np.random.randn(n_inputs, n_neurons) / np.sqrt(2.0 / n_inputs)
         self.biases = np.zeros((1, n_neurons))
 
     def forward(self, inputs):
+        self.inputs = inputs
         self.output = np.dot(inputs, self.weights) + self.biases
     
     def backward(self, dvalues):
@@ -175,6 +182,7 @@ class Layer_Dense:
 
 class Activation_ReLU:
     def forward(self, inputs):
+        self.inputs = inputs
         self.output = np.maximum(0, inputs)
 
     def backward(self, dvalues):
@@ -232,16 +240,27 @@ class Activation_Softmax_Loss_CategoricalCrossentropy:
         self.dinputs = self.dinputs / samples #normalize by this batch
 
 class Optimizer_SGD:
-    def __init__(self, learning_rate=1.0):
+    def __init__(self, learning_rate, momentum=0.9):
         self.learning_rate = learning_rate
+        self.momentum = momentum
 
     def update_params(self, layer):
-        layer.weights += -self.learning_rate * layer.dweights
-        layer.biases += -self.learning_rate * layer.dbiases
+        if not hasattr(layer, 'weight_momentums'):
+            layer.weight_momentums = np.zeros_like(layer.weights)
+            layer.bias_momentums = np.zeros_like(layer.biases)
+
+        weight_updates = self.momentum * layer.weight_momentums - self.learning_rate * layer.dweights
+        bias_updates = self.momentum * layer.bias_momentums - self.learning_rate * layer.dbiases
+
+        layer.weight_momentums = weight_updates
+        layer.bias_momentums = bias_updates
+
+        layer.weights += weight_updates
+        layer.biases += bias_updates
 
 def train_test_split(X, y, test_fraction=0.2, seed=0):
     rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(x))
+    idx = rng.permutation(len(X))
     split = int(len(X) * (1 - test_fraction))
     train_idx, test_idx = idx[:split], idx[split:]
     return X[train_idx], y[train_idx], X[test_idx], y[test_idx]
@@ -269,16 +288,19 @@ def forward_pass(layers, X_batch, y_batch):
     layers['conv1'].forward(X_batch)
     layers['relu1'].forward(layers['conv1'].output)
     layers['pool1'].forward(layers['relu1'].output)
+    print("fraction dead:", np.mean(layers['relu1'].output == 0))
 
     layers['conv2'].forward(layers['pool1'].output)
     layers['relu2'].forward(layers['conv2'].output)
     layers['pool2'].forward(layers['relu2'].output)
+    print("fraction dead:", np.mean(layers['relu2'].output == 0))
 
     layers['flatten'].forward(layers['pool2'].output)
 
     layers['dense1'].forward(layers['flatten'].output)
     layers['relu3'].forward(layers['dense1'].output)
     layers['dense2'].forward(layers['relu3'].output)
+    print("fraction dead:", np.mean(layers['relu3'].output == 0))
 
     loss = layers['loss_activation'].forward(layers['dense2'].output, y_batch)
     return loss
@@ -300,7 +322,7 @@ def backward_pass(layers, y_batch):
     layers['relu1'].backward(layers['pool1'].dinputs)
     layers['conv1'].backward(layers['relu1'].dinputs)
 
-def train(root_dir, img_size=64, epochs=30, batch_size=16, learning_rate=1.0):
+def train(root_dir, img_size=64, epochs=30, batch_size=30, learning_rate=0.01):
     X, y, class_names = load_face_dataset(root_dir, img_size=img_size)
     X_train, y_train, X_test, y_test = train_test_split(X, y, test_fraction=0.2)
 
@@ -314,6 +336,8 @@ def train(root_dir, img_size=64, epochs=30, batch_size=16, learning_rate=1.0):
         X_train, y_train = X_train[perm], y_train[perm]
 
         epoch_losses = []
+        epoch_correct = 0
+        epoch_total = 0
         for start in range(0, n_samples, batch_size):
             X_batch = X_train[start:start + batch_size]
             y_batch = y_train[start:start + batch_size]
@@ -321,16 +345,24 @@ def train(root_dir, img_size=64, epochs=30, batch_size=16, learning_rate=1.0):
             loss = forward_pass(layers, X_batch, y_batch)
             epoch_losses.append(loss)
 
+            preds = np.argmax(layers['loss_activation'].output, axis = 1)
+            epoch_correct += np.sum(preds == y_batch)
+            epoch_total += len(y_batch)
+
             backward_pass(layers, y_batch)
 
             for name in ('conv1', 'conv2', 'dense1', 'dense2'):
                 optimizer.update_params(layers[name])
 
+        train_acc = epoch_correct / epoch_total
         test_loss = forward_pass(layers, X_test, y_test)
         preds = np.argmax(layers['loss_activation'].output, axis=1)
         test_acc = np.mean(preds == y_test)
 
         print(f"epoch {epoch+1:3d} | train loss {np.mean(epoch_losses):.3f} "
-              f"| test loss {test_loss:.3f} | test acc {test_acc:.3f}")
+              f"| test loss {test_loss:.3f} | train_acc {train_acc:.3f} | test acc {test_acc:.3f}")
 
     return layers, class_names
+
+layers, class_names = train(root_dir='faces/', img_size=64, epochs=60, batch_size=15)
+print("Classes:", class_names)
